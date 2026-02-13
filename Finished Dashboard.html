@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Windows Devices Dashboard</title>
+
+<!-- Chart.js library (used to draw charts) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+/* ------------------------------
+   BASIC PAGE STYLING
+------------------------------ */
+body {
+    font-family: Segoe UI, Arial, sans-serif;
+    background: #f4f6f9;
+    padding: 30px;
+}
+
+h1 { margin-bottom: 5px; }
+.subtitle { color: #666; margin-bottom: 20px; }
+
+/* ------------------------------
+   SUMMARY CARDS
+------------------------------ */
+.cards {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.card {
+    background: white;
+    padding: 20px;
+    border-radius: 14px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+}
+
+.card-title {
+    font-size: 14px;
+    color: #777;
+}
+
+.card-value {
+    font-size: 32px;
+    font-weight: bold;
+    margin-top: 8px;
+}
+
+.export-btn {
+    margin-top: 10px;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 6px;
+    background: #3399ff;
+    color: white;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+/* ------------------------------
+   FILTER + CHART LAYOUT
+------------------------------ */
+.filter-box {
+    margin-bottom: 20px;
+}
+
+.charts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+.chart-box {
+    background: white;
+    padding: 20px;
+    border-radius: 14px;
+    height: 280px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>Windows Devices</h1>
+<div class="subtitle">OS & Region View</div>
+
+<!-- CSV file upload -->
+<input type="file" id="csvFile" accept=".csv">
+
+<!-- Region dropdown -->
+<div class="filter-box">
+    <strong>Filter by Region:</strong>
+    <select id="regionFilter">
+        <option value="ALL">All Regions</option>
+        <option value="Asia">Asia</option>
+        <option value="US">US</option>
+        <option value="Europe">Europe</option>
+    </select>
+</div>
+
+<!-- SUMMARY CARDS -->
+<div class="cards">
+    <div class="card">
+        <div class="card-title">Total Devices</div>
+        <div class="card-value" id="total">0</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Windows 10</div>
+        <div class="card-value" id="w10">0</div>
+        <button class="export-btn" onclick="exportCSV('W10')">Export</button>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Windows 11 23H2</div>
+        <div class="card-value" id="h23">0</div>
+        <button class="export-btn" onclick="exportCSV('23H2')">Export</button>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Windows 11 24H2</div>
+        <div class="card-value" id="h24">0</div>
+        <button class="export-btn" onclick="exportCSV('24H2')">Export</button>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Windows 11 25H2</div>
+        <div class="card-value" id="h25">0</div>
+        <button class="export-btn" onclick="exportCSV('25H2')">Export</button>
+    </div>
+</div>
+
+<!-- CHARTS -->
+<div class="charts">
+    <div class="chart-box">
+        <canvas id="barChart"></canvas>
+    </div>
+    <div class="chart-box">
+        <canvas id="donutChart"></canvas>
+    </div>
+</div>
+
+<script>
+/* ======================================================
+   SECTION 1: VARIABLES (GLOBAL)
+   These are used everywhere in the file
+====================================================== */
+
+// Stores the header row from CSV (used when exporting)
+let originalHeaders = [];
+
+// All valid devices after removing virtual machines
+let allDevices = [];
+
+// Devices after region filter is applied
+let filteredDevices = [];
+
+// Chart objects (so we can destroy and redraw them)
+let barChart;
+let donutChart;
+
+
+/* ======================================================
+   SECTION 2: FILE UPLOAD HANDLER
+   Runs when user selects a CSV file
+====================================================== */
+
+document.getElementById("csvFile").addEventListener("change", function (event) {
+
+    const reader = new FileReader();
+
+    // This runs after file is fully loaded
+    reader.onload = function (e) {
+        parseCSV(e.target.result);
+    };
+
+    reader.readAsText(event.target.files[0]);
+});
+
+
+/* ======================================================
+   SECTION 3: REGION FILTER HANDLER
+====================================================== */
+
+document.getElementById("regionFilter")
+        .addEventListener("change", applyRegionFilter);
+
+
+/* ======================================================
+   SECTION 4: CSV PARSING
+   - Reads CSV
+   - Removes VMs
+   - Detects region
+====================================================== */
+
+function parseCSV(csvText) {
+
+    // Split file into rows
+    const rows = csvText.split(/\r?\n/).filter(row => row.trim());
+
+    // First row is header
+    originalHeaders = rows[0].split(",");
+
+    // Convert headers to lowercase for easy matching
+    const headers = originalHeaders.map(h =>
+        h.replace(/"/g, "").trim().toLowerCase()
+    );
+
+    const osIndex = headers.indexOf("os version");
+    const modelIndex = headers.indexOf("model");
+    const nameIndex = headers.indexOf("device name");
+
+    // Reset data
+    allDevices = [];
+
+    // Start from row 1 (skip header)
+    for (let i = 1; i < rows.length; i++) {
+
+        const cols = rows[i].split(",");
+        const model = cols[modelIndex]?.replace(/"/g, "").trim();
+
+        // Remove known virtual machines
+        if (
+            model === "Virtual Machine" ||
+            model === "Cloud PC Enterprise 4vCPU/16GB/128GB" ||
+            model === "VMware20,1"
+        ) {
+            continue;
+        }
+
+        // Detect region from device name
+        const deviceName = cols[nameIndex].replace(/"/g, "").trim();
+        let region = "Europe";
+
+        if (deviceName.endsWith("-A")) region = "Asia";
+        else if (deviceName.endsWith("-U")) region = "US";
+
+        allDevices.push({
+            columns: cols,
+            osVersion: cols[osIndex].replace(/"/g, "").trim(),
+            region: region
+        });
+    }
+
+    applyRegionFilter();
+}
+
+
+/* ======================================================
+   SECTION 5: APPLY REGION FILTER
+====================================================== */
+
+function applyRegionFilter() {
+
+    const selectedRegion = document.getElementById("regionFilter").value;
+
+    if (selectedRegion === "ALL") {
+        filteredDevices = allDevices;
+    } else {
+        filteredDevices = allDevices.filter(
+            device => device.region === selectedRegion
+        );
+    }
+
+    updateDashboard();
+}
+
+
+/* ======================================================
+   SECTION 6: UPDATE DASHBOARD NUMBERS
+====================================================== */
+
+function updateDashboard() {
+
+    let win10 = 0;
+    let h23 = 0;
+    let h24 = 0;
+    let h25 = 0;
+
+    filteredDevices.forEach(device => {
+
+        const build = device.osVersion.split(".")[2];
+
+        if (build === "19045") win10++;
+        else if (build === "22631") h23++;
+        else if (build === "26100") h24++;
+        else if (build.startsWith("26200")) h25++;
+    });
+
+    document.getElementById("total").textContent = filteredDevices.length;
+    document.getElementById("w10").textContent = win10;
+    document.getElementById("h23").textContent = h23;
+    document.getElementById("h24").textContent = h24;
+    document.getElementById("h25").textContent = h25;
+
+    drawCharts(win10, h23, h24, h25);
+}
+
+
+/* ======================================================
+   SECTION 7: DRAW CHARTS
+====================================================== */
+
+function drawCharts(win10, h23, h24, h25) {
+
+    const dataValues = [win10, h23, h24, h25];
+
+    if (barChart) barChart.destroy();
+    if (donutChart) donutChart.destroy();
+
+    barChart = new Chart(
+        document.getElementById("barChart").getContext("2d"),
+        {
+            type: "bar",
+            data: {
+                labels: ["Windows 10", "23H2", "24H2", "25H2"],
+                datasets: [{
+                    data: dataValues,
+                    backgroundColor: "#3399ff"
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } }
+            }
+        }
+    );
+
+    donutChart = new Chart(
+        document.getElementById("donutChart").getContext("2d"),
+        {
+            type: "doughnut",
+            data: {
+                labels: ["Windows 10", "23H2", "24H2", "25H2"],
+                datasets: [{
+                    data: dataValues,
+                    backgroundColor: [
+                        "#775dd0",
+                        "#3399ff",
+                        "#00e396",
+                        "#feb019"
+                    ]
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false
+            }
+        }
+    );
+}
+
+
+/* ======================================================
+   SECTION 8: EXPORT CSV
+====================================================== */
+
+function exportCSV(version) {
+
+    const rowsToExport = filteredDevices.filter(device => {
+
+        const build = device.osVersion.split(".")[2];
+
+        if (version === "W10") return build === "19045";
+        if (version === "23H2") return build === "22631";
+        if (version === "24H2") return build === "26100";
+        if (version === "25H2") return build.startsWith("26200");
+    });
+
+    if (rowsToExport.length === 0) {
+        alert("No data to export");
+        return;
+    }
+
+    let csvContent = originalHeaders.join(",") + "\n";
+    csvContent += rowsToExport
+        .map(row => row.columns.join(","))
+        .join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `Devices_${version}.csv`;
+    link.click();
+}
+</script>
+
+</body>
+</html>
+/
